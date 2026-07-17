@@ -1319,6 +1319,11 @@ void esp32setup()
         if (radio.setFrequency(meshcom_settings.node_freq) == RADIOLIB_ERR_INVALID_FREQUENCY) {
             printlndeb(F("Selected frequency is invalid for this module!"));
         }
+        else
+        {
+            if(meshcom_settings.node_freq > 440)
+                printlndeb(F("[LoRa]...SAT Only Frequency out of Band"));
+        }
 
         // set bandwidth 
         printfdeb("[LoRa]...RF_BANDWIDTH: %.0f kHz\n", meshcom_settings.node_bw);
@@ -2662,6 +2667,23 @@ void esp32loop()
     #if defined(ENABLE_SOFTSER)
         if(bSOFTSERON)
         {
+            // Reset Node on XML not working
+            #if defined(ENABLE_XML)
+            extern unsigned long lTELE_TIMER;
+            if(lTELE_TIMER == 0)
+            {
+                lTELE_TIMER = millis();
+            }
+
+            // check every 50 seconds to check telemetry via serial interface is ok
+            if ((lTELE_TIMER + 50000) < millis())
+            {
+                printfdeb("[SOFTSER] Reset Node, XML not working\n");
+                delay(1000);
+                ESP.restart();
+            }
+            #endif
+
             // check every 5 seconds to ready next telemetry via serial interface
             if ((softser_refresh_timer + 5000) < millis() && softserFunktion == 0)
             {
@@ -3863,11 +3885,16 @@ void checkSerialCommand(void)
         if(Serial.available() > 0)
         {
             char rd = (char)Serial.read();
-            printdeb(rd);   // echo to USB + net console via MSerial
-            strText[iTxtPos] = rd;
-            if(iTxtPos < (int)sizeof(strText) - 1)
+            // Drop NUL bytes: UART RX noise (e.g. unpowered USB-UART bridge on battery
+            // supply) delivers 0x00 which strlen() cannot see and wedges the parser.
+            if(rd != 0x00)
             {
-                iTxtPos++;
+                printdeb(rd);   // echo to USB + net console via MSerial
+                strText[iTxtPos] = rd;
+                if(iTxtPos < (int)sizeof(strText) - 1)
+                {
+                    iTxtPos++;
+                }
             }
         }
     }
@@ -3883,7 +3910,7 @@ void checkSerialCommand(void)
             if(netConsoleAvailable()) netConsoleRead();
             if(netConsoleAvailable()) netConsoleRead();
         }
-        else if(rd != '\r')         // strip CR, keep LF
+        else if(rd != '\r' && rd != 0x00)   // strip CR, keep LF; drop NUL (see above)
         {
             printdeb(rd);       // echo back via MSerial (server-side echo)
             strText[iTxtPos] = rd;
@@ -3896,6 +3923,17 @@ void checkSerialCommand(void)
     #endif
 
     iTxtLen = strlen(strText);
+
+    // Self-healing: normally every stored byte is non-NUL, so strlen == iTxtPos.
+    // A stray NUL in the buffer breaks that invariant and would block command
+    // processing forever (early return below never reaches the memset). Discard.
+    if(iTxtLen != iTxtPos)
+    {
+        memset(strText, 0x00, sizeof(strText));
+        iTxtPos = 0;
+        return;
+    }
+
     if(iTxtLen == 0)
         return;
 
